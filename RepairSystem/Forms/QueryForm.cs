@@ -289,6 +289,12 @@ namespace RepairSystem.Forms
                         DataTable dt = new DataTable();
                         adapter.Fill(dt);
 
+                        // 將 Id 欄位改為順序編號
+                        for (int i = 0; i < dt.Rows.Count; i++)
+                        {
+                            dt.Rows[i]["Id"] = (i + 1).ToString();
+                        }
+
                         dataGridViewQuery.Columns.Clear();
                         if (isRepairOrderQuery)
                         {
