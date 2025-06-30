@@ -1,0 +1,543 @@
+using System;
+using System.Data;
+using System.IO;
+using System.Windows.Forms;
+using RepairSystem.Helpers;
+using Microsoft.VisualBasic;
+using NPOI.SS.UserModel;
+using NPOI.XSSF.UserModel;
+using System.Linq;
+
+namespace RepairSystem.Forms
+{
+    public partial class QueryForm : Form
+    {
+        private int currentPage = 1;
+        private int rowsPerPage = 20;
+        private string currentQuery = null;
+        private bool isRepairOrderQuery = true;
+
+        public QueryForm()
+        {
+            InitializeComponent();
+            SetupForm();
+        }
+
+        private void SetupForm()
+        {
+            // 初始化查詢類型
+            LoadDropdownData(comboBoxType, "RepairType", "TypeName");
+            LoadDropdownData(comboBoxFaultDescription, "FaultType", "FaultName");
+
+            comboBoxLine.Items.AddRange(new object[] { 20, 50, 100 });
+            comboBoxLine.SelectedIndex = 0; // 預設為 20 列
+            comboBoxLine.SelectedIndexChanged += (s, e) =>
+            {
+                rowsPerPage = Convert.ToInt32(comboBoxLine.SelectedItem);
+                LoadQueryResults();
+            };
+
+            buttonCustomerQuery.Click += (s, e) => QueryCustomers();
+            buttonRepairQuery.Click += (s, e) => QueryRepairOrders();
+            buttonExportExcel.Click += (s, e) => ExportToExcel();
+
+            buttonFirst.Click += (s, e) => { currentPage = 1; LoadQueryResults(); };
+            buttonPrev.Click += (s, e) => { if (currentPage > 1) currentPage--; LoadQueryResults(); };
+            buttonNext.Click += (s, e) => { currentPage++; LoadQueryResults(); };
+            buttonLast.Click += (s, e) => { currentPage = int.MaxValue; LoadQueryResults(); };
+
+            SetupDataGrid();
+        }
+
+        private void LoadDropdownData(ComboBox comboBox, string tableName, string columnName)
+        {
+            try
+            {
+                using (var connection = DatabaseHelper.Instance.GetConnection())
+                {
+                    connection.Open();
+                    string query = $"SELECT {columnName} FROM {tableName}";
+
+                    using (var adapter = new System.Data.SQLite.SQLiteDataAdapter(query, connection))
+                    {
+                        DataTable dt = new DataTable();
+                        adapter.Fill(dt);
+
+                        foreach (DataRow row in dt.Rows)
+                        {
+                            comboBox.Items.Add(row[columnName].ToString());
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"載入 {tableName} 失敗：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void SetupDataGrid()
+        {
+            dataGridViewQuery.AutoGenerateColumns = false;
+            dataGridViewQuery.Columns.Clear();
+            dataGridViewQuery.Columns.Add("Id", "編號");
+            dataGridViewQuery.Columns.Add("Type", "類型");
+            dataGridViewQuery.Columns.Add("CustomerName", "客戶名稱");
+            dataGridViewQuery.Columns.Add("ContactName", "叫修人姓名");
+            dataGridViewQuery.Columns.Add("Phone", "電話");
+            dataGridViewQuery.Columns.Add("StartTime", "叫修時間");
+            dataGridViewQuery.Columns.Add("EndTime", "完修時間");
+            dataGridViewQuery.Columns.Add("Model", "叫修機型");
+            dataGridViewQuery.Columns.Add("FaultDescription", "故障現象");
+            dataGridViewQuery.Columns.Add("WorkRecord", "工作紀錄");
+            dataGridViewQuery.Columns.Add("HardwareSpecs", "更換硬體規格");
+            dataGridViewQuery.Columns.Add("Engineer", "工程師");
+
+            // 強制 DataPropertyName 對應
+            foreach (DataGridViewColumn col in dataGridViewQuery.Columns)
+            {
+                if (col is DataGridViewButtonColumn) continue;
+                col.DataPropertyName = col.Name;
+            }
+
+            var editButton = new DataGridViewButtonColumn
+            {
+                Name = "Edit",
+                HeaderText = "修改",
+                Text = "修改",
+                UseColumnTextForButtonValue = true
+            };
+            var deleteButton = new DataGridViewButtonColumn
+            {
+                Name = "Delete",
+                HeaderText = "刪除",
+                Text = "刪除",
+                UseColumnTextForButtonValue = true
+            };
+
+            dataGridViewQuery.Columns.Add(editButton);
+            dataGridViewQuery.Columns.Add(deleteButton);
+            dataGridViewQuery.CellClick += DataGridViewQuery_CellClick;
+
+            dataGridViewQuery.Columns["StartTime"].DefaultCellStyle.Format = "yyyy-MM-dd HH:mm";
+            dataGridViewQuery.Columns["EndTime"].DefaultCellStyle.Format = "yyyy-MM-dd HH:mm";
+        }
+
+        private void QueryCustomers()
+        {
+            dataGridViewQuery.Columns.Clear();
+            dataGridViewQuery.AutoGenerateColumns = true;
+
+            string customerName = textBox1CustomerName.Text.Trim();
+            string phone = textBoxPhone.Text.Trim();
+            string address = textBoxAddress.Text.Trim();
+            string email = textBoxEmail.Text.Trim();
+
+            string query = "SELECT * FROM Customer WHERE 1=1";
+            if (!string.IsNullOrEmpty(customerName)) query += $" AND CustomerName LIKE '%{customerName}%'";
+            if (!string.IsNullOrEmpty(phone)) query += $" AND Phone LIKE '%{phone}%'";
+            if (!string.IsNullOrEmpty(address)) query += $" AND Address LIKE '%{address}%'";
+            if (!string.IsNullOrEmpty(email)) query += $" AND Email LIKE '%{email}%'";
+
+            LoadQueryResults(query, false); // 客戶查詢
+        }
+
+        private void QueryRepairOrders()
+        {
+            dataGridViewQuery.Columns.Clear();
+            dataGridViewQuery.AutoGenerateColumns = false;
+            SetupDataGrid();
+
+            string type = comboBoxType.Text.Trim();
+            string customerName = textBox2CustomerName.Text.Trim();
+            string contactName = textBoxContactName.Text.Trim();
+            string faultDescription = comboBoxFaultDescription.Text.Trim();
+            string engineer = textBoxEngineer.Text.Trim();
+            DateTime startTime = dateTimePickerStartTime.Value;
+            DateTime startTimeRange = dateTimePickerStartTimeRange.Value;
+            DateTime endTime = dateTimePickerEndTime.Value;
+            DateTime endTimeRange = dateTimePickerEndTimeRange.Value;
+
+            // 驗證時間範圍
+            if (checkBoxEnableStartTime.Checked && dateTimePickerStartTime.Value > dateTimePickerStartTimeRange.Value)
+            {
+                MessageBox.Show("開始時間不能晚於開始時間範圍！", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (checkBoxEnableEndTime.Checked && dateTimePickerEndTime.Value > dateTimePickerEndTimeRange.Value)
+            {
+                MessageBox.Show("結束時間不能晚於結束時間範圍！", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (checkBoxEnableStartTime.Checked && checkBoxEnableEndTime.Checked && 
+                dateTimePickerStartTime.Value > dateTimePickerEndTime.Value)
+            {
+                MessageBox.Show("開始時間不能晚於結束時間！", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+
+            string query = "SELECT Id, Type, CustomerName, ContactName, Phone, StartTime, EndTime, Model, FaultDescription, WorkRecord, HardwareSpecs, Engineer FROM RepairOrder WHERE 1=1";
+            
+            // 添加基本查詢條件
+            if (!string.IsNullOrEmpty(type)) query += $" AND Type LIKE '%{type}%'";
+            if (!string.IsNullOrEmpty(customerName)) query += $" AND CustomerName LIKE '%{customerName}%'";
+            if (!string.IsNullOrEmpty(contactName)) query += $" AND ContactName LIKE '%{contactName}%'";
+            if (!string.IsNullOrEmpty(faultDescription)) query += $" AND FaultDescription LIKE '%{faultDescription}%'";
+            if (!string.IsNullOrEmpty(engineer)) query += $" AND Engineer LIKE '%{engineer}%'";
+            
+            // 添加時間範圍查詢條件
+            if (checkBoxEnableStartTime.Checked && checkBoxEnableEndTime.Checked)
+            {
+                query += $" AND StartTime >= '{startTime:yyyy-MM-dd HH:mm}' AND StartTime <= '{startTimeRange:yyyy-MM-dd HH:mm}'";
+                query += $" AND (EndTime IS NULL OR EndTime <= '{endTimeRange:yyyy-MM-dd HH:mm}') AND (EndTime IS NULL OR EndTime >= '{endTime:yyyy-MM-dd HH:mm}')";
+            }
+            else if (checkBoxEnableStartTime.Checked)
+            {
+                query += $" AND StartTime >= '{startTime:yyyy-MM-dd HH:mm}' AND StartTime <= '{startTimeRange:yyyy-MM-dd HH:mm}'";
+            }
+            else if (checkBoxEnableEndTime.Checked)
+            {
+                query += $" AND (EndTime IS NULL OR EndTime <= '{endTimeRange:yyyy-MM-dd HH:mm}') AND (EndTime IS NULL OR EndTime >= '{endTime:yyyy-MM-dd HH:mm}')";
+            }
+
+            // 添加排序
+            query += " ORDER BY StartTime DESC";
+
+            LoadQueryResults(query, true); // 報修查詢
+        }
+
+        private void LoadQueryResults(string query = null, bool isRepairOrder = false)
+        {
+            // 儲存當前的查詢條件
+            if (query != null)
+            {
+                currentQuery = query;
+                isRepairOrderQuery = isRepairOrder;
+            }
+            else if (currentQuery == null)
+            {
+                currentQuery = "SELECT Id, Type, CustomerName, ContactName, Phone, StartTime, EndTime, Model, FaultDescription, WorkRecord, HardwareSpecs, Engineer FROM RepairOrder ORDER BY StartTime DESC";
+                isRepairOrderQuery = true;
+            }
+
+            // 添加分頁條件
+            string pagedQuery = $"{currentQuery} LIMIT {rowsPerPage} OFFSET {(currentPage - 1) * rowsPerPage}";
+
+            try
+            {
+                using (var connection = DatabaseHelper.Instance.GetConnection())
+                {
+                    connection.Open();
+                    using (var adapter = new System.Data.SQLite.SQLiteDataAdapter(query, connection))
+                    {
+                        DataTable dt = new DataTable();
+                        adapter.Fill(dt);
+
+                        dataGridViewQuery.Columns.Clear();
+                        if (isRepairOrderQuery)
+                        {
+                            dataGridViewQuery.AutoGenerateColumns = false;
+                            SetupDataGrid();
+                        }
+                        else
+                        {
+                            dataGridViewQuery.AutoGenerateColumns = true;
+                            dataGridViewQuery.DataSource = dt;
+                            // 設定欄位標題為中文
+                            if (dataGridViewQuery.Columns.Contains("Id"))
+                                dataGridViewQuery.Columns["Id"].HeaderText = "編號";
+                            if (dataGridViewQuery.Columns.Contains("CustomerName"))
+                                dataGridViewQuery.Columns["CustomerName"].HeaderText = "客戶名稱";
+                            if (dataGridViewQuery.Columns.Contains("TaxId"))
+                                dataGridViewQuery.Columns["TaxId"].HeaderText = "統一編號";
+                            if (dataGridViewQuery.Columns.Contains("Phone"))
+                                dataGridViewQuery.Columns["Phone"].HeaderText = "連絡電話";
+                            if (dataGridViewQuery.Columns.Contains("ZipCode"))
+                                dataGridViewQuery.Columns["ZipCode"].HeaderText = "郵遞區號";
+                            if (dataGridViewQuery.Columns.Contains("Address"))
+                                dataGridViewQuery.Columns["Address"].HeaderText = "聯絡地址";
+                            if (dataGridViewQuery.Columns.Contains("Email"))
+                                dataGridViewQuery.Columns["Email"].HeaderText = "電子郵件";
+                            if (dataGridViewQuery.Columns.Contains("CreatedTime"))
+                                dataGridViewQuery.Columns["CreatedTime"].HeaderText = "建立時間";
+                            // 增加修改與刪除按鈕
+                            if (!dataGridViewQuery.Columns.Contains("Edit"))
+                            {
+                                var editButton = new DataGridViewButtonColumn
+                                {
+                                    Name = "Edit",
+                                    HeaderText = "修改",
+                                    Text = "修改",
+                                    UseColumnTextForButtonValue = true
+                                };
+                                dataGridViewQuery.Columns.Add(editButton);
+                            }
+                            if (!dataGridViewQuery.Columns.Contains("Delete"))
+                            {
+                                var deleteButton = new DataGridViewButtonColumn
+                                {
+                                    Name = "Delete",
+                                    HeaderText = "刪除",
+                                    Text = "刪除",
+                                    UseColumnTextForButtonValue = true
+                                };
+                                dataGridViewQuery.Columns.Add(deleteButton);
+                            }
+                        }
+
+                        if (isRepairOrderQuery)
+                        {
+                            dataGridViewQuery.DataSource = dt;
+                        }
+                    }
+                }
+                tabControlQuery.SelectedTab = tabPageQueryResult;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"載入查詢結果失敗：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void DataGridViewQuery_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+
+            // 只有在點擊按鈕列時才處理
+            if (dataGridViewQuery.Columns[e.ColumnIndex] is DataGridViewButtonColumn)
+            {
+                var cell = dataGridViewQuery.Rows[e.RowIndex].Cells["Id"];
+                if (cell == null || cell.Value == null)
+                {
+                    MessageBox.Show("找不到報修單編號，請檢查資料表結構與欄位名稱。", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                string id = cell.Value.ToString();
+
+                if (dataGridViewQuery.Columns[e.ColumnIndex].Name == "Edit")
+                {
+                    // 確保只有一個編輯表單被打開
+                    if (Application.OpenForms.OfType<RepairUpdateForm>().Any())
+                    {
+                        var existingForm = Application.OpenForms.OfType<RepairUpdateForm>().First();
+                        existingForm.BringToFront();
+                        existingForm.Focus();
+                        return;
+                    }
+                    EditRecord(id);
+                }
+                else if (dataGridViewQuery.Columns[e.ColumnIndex].Name == "Delete")
+                {
+                    DeleteRecord(id);
+                }
+            }
+        }
+
+        private void EditRecord(string id)
+        {
+            // 判斷目前顯示的是客戶查詢還是報修單查詢
+            bool isCustomer = dataGridViewQuery.Columns.Contains("CustomerName") &&
+                              dataGridViewQuery.Columns.Contains("Phone") &&
+                              dataGridViewQuery.Columns.Contains("Address") &&
+                              dataGridViewQuery.Columns.Contains("Email");
+
+            if (isCustomer)
+            {
+                // 取得目前選取的資料
+                DataGridViewRow row = null;
+                foreach (DataGridViewRow r in dataGridViewQuery.Rows)
+                {
+                    if (r.Cells["Id"].Value != null && r.Cells["Id"].Value.ToString() == id)
+                    {
+                        row = r;
+                        break;
+                    }
+                }
+                if (row == null)
+                {
+                    MessageBox.Show("找不到要編輯的客戶資料。", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                string customerName = row.Cells["CustomerName"].Value?.ToString() ?? "";
+                string phone = row.Cells["Phone"].Value?.ToString() ?? "";
+                string zipCode = dataGridViewQuery.Columns.Contains("ZipCode") ? row.Cells["ZipCode"].Value?.ToString() ?? "" : "";
+                string address = row.Cells["Address"].Value?.ToString() ?? "";
+                string email = row.Cells["Email"].Value?.ToString() ?? "";
+
+                string newCustomerName = Microsoft.VisualBasic.Interaction.InputBox("請輸入客戶名稱：", "編輯客戶", customerName);
+                if (string.IsNullOrWhiteSpace(newCustomerName)) return;
+                string newPhone = Microsoft.VisualBasic.Interaction.InputBox("請輸入連絡電話：", "編輯客戶", phone);
+                string newZipCode = Microsoft.VisualBasic.Interaction.InputBox("請輸入郵遞區號：", "編輯客戶", zipCode);
+                string newAddress = Microsoft.VisualBasic.Interaction.InputBox("請輸入聯絡地址：", "編輯客戶", address);
+                string newEmail = Microsoft.VisualBasic.Interaction.InputBox("請輸入電子郵件：", "編輯客戶", email);
+
+                try
+                {
+                    using (var connection = DatabaseHelper.Instance.GetConnection())
+                    {
+                        connection.Open();
+                        string sql = @"UPDATE Customer SET CustomerName = @CustomerName, Phone = @Phone, ZipCode = @ZipCode, Address = @Address, Email = @Email WHERE Id = @Id";
+                        using (var command = new System.Data.SQLite.SQLiteCommand(sql, connection))
+                        {
+                            command.Parameters.AddWithValue("@Id", id);
+                            command.Parameters.AddWithValue("@CustomerName", newCustomerName);
+                            command.Parameters.AddWithValue("@Phone", newPhone);
+                            command.Parameters.AddWithValue("@ZipCode", newZipCode);
+                            command.Parameters.AddWithValue("@Address", newAddress);
+                            command.Parameters.AddWithValue("@Email", newEmail);
+                            command.ExecuteNonQuery();
+                        }
+                    }
+                    MessageBox.Show("客戶資料已更新！", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    QueryCustomers(); // 重新查詢刷新
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"更新客戶資料失敗：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            else
+            {
+                // 報修單編輯 - 使用 RepairUpdateForm 表單
+                if (!int.TryParse(id, out int repairId) || repairId <= 0)
+                {
+                    MessageBox.Show("無效的報修單編號。", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                using (var updateForm = new RepairUpdateForm(repairId))
+                {
+                    if (updateForm.ShowDialog() == DialogResult.OK)
+                    {
+                        LoadQueryResults();
+                    }
+                }
+            }
+        }
+
+        private void DeleteRecord(string id)
+        {
+            if (MessageBox.Show($"確定刪除 ID: {id} 的記錄嗎？", "確認刪除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            {
+                try
+                {
+                    // 判斷是客戶資料還是報修單
+                    bool isCustomer = dataGridViewQuery.Columns.Contains("CustomerName") &&
+                                    dataGridViewQuery.Columns.Contains("Phone") &&
+                                    dataGridViewQuery.Columns.Contains("Address") &&
+                                    dataGridViewQuery.Columns.Contains("Email");
+
+                    using (var connection = DatabaseHelper.Instance.GetConnection())
+                    {
+                        connection.Open();
+                        string query = isCustomer ? 
+                            "DELETE FROM Customer WHERE Id = @Id" : 
+                            "DELETE FROM RepairOrder WHERE Id = @Id";
+
+                        using (var command = new System.Data.SQLite.SQLiteCommand(query, connection))
+                        {
+                            command.Parameters.AddWithValue("@Id", id);
+                            int rowsAffected = command.ExecuteNonQuery();
+                            
+                            if (rowsAffected > 0)
+                            {
+                                MessageBox.Show($"已成功刪除 ID: {id} 的記錄", "刪除成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                // 重新載入查詢結果
+                                if (isCustomer)
+                                    QueryCustomers();
+                                else
+                                    LoadQueryResults();
+                            }
+                            else
+                            {
+                                MessageBox.Show($"找不到 ID: {id} 的記錄", "刪除失敗", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"刪除記錄時發生錯誤：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void ExportToExcel()
+        {
+            if (dataGridViewQuery.DataSource == null)
+            {
+                MessageBox.Show("沒有查詢結果可匯出！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            SaveFileDialog saveFileDialog = new SaveFileDialog();
+            saveFileDialog.Filter = "Excel 檔案 (*.xlsx)|*.xlsx";
+            saveFileDialog.Title = "匯出查詢結果";
+            saveFileDialog.FileName = "查詢結果.xlsx";
+            if (saveFileDialog.ShowDialog() != DialogResult.OK) return;
+
+            try
+            {
+                var dt = dataGridViewQuery.DataSource as DataTable;
+                if (dt == null)
+                {
+                    // 若 DataSource 不是 DataTable，則手動組 DataTable
+                    dt = new DataTable();
+                    foreach (DataGridViewColumn col in dataGridViewQuery.Columns)
+                    {
+                        if (col.Visible && !(col is DataGridViewButtonColumn))
+                            dt.Columns.Add(col.HeaderText);
+                    }
+                    foreach (DataGridViewRow row in dataGridViewQuery.Rows)
+                    {
+                        if (row.IsNewRow) continue;
+                        var values = new object[dt.Columns.Count];
+                        int idx = 0;
+                        foreach (DataGridViewColumn col in dataGridViewQuery.Columns)
+                        {
+                            if (col.Visible && !(col is DataGridViewButtonColumn))
+                                values[idx++] = row.Cells[col.Index].Value;
+                        }
+                        dt.Rows.Add(values);
+                    }
+                }
+                using (var fs = new FileStream(saveFileDialog.FileName, FileMode.Create, FileAccess.Write))
+                {
+                    IWorkbook workbook = new XSSFWorkbook();
+                    ISheet sheet = workbook.CreateSheet("查詢結果");
+                    // 標題
+                    IRow headerRow = sheet.CreateRow(0);
+                    var exportColumns = dataGridViewQuery.Columns.Cast<DataGridViewColumn>()
+                        .Where(col => col.Visible && !(col is DataGridViewButtonColumn)).ToList();
+                    for (int i = 0; i < exportColumns.Count; i++)
+                    {
+                        headerRow.CreateCell(i).SetCellValue(exportColumns[i].HeaderText);
+                    }
+                    // 內容
+                    for (int i = 0; i < dt.Rows.Count; i++)
+                    {
+                        IRow row = sheet.CreateRow(i + 1);
+                        for (int j = 0; j < exportColumns.Count; j++)
+                        {
+                            var val = dt.Rows[i][exportColumns[j].DataPropertyName];
+                            if (exportColumns[j].HeaderText.Contains("時間") && DateTime.TryParse(val?.ToString(), out DateTime dtVal))
+                                row.CreateCell(j).SetCellValue(dtVal.ToString("yyyy-MM-dd HH:mm"));
+                            else
+                                row.CreateCell(j).SetCellValue(val?.ToString() ?? "");
+                        }
+                    }
+                    for (int i = 0; i < exportColumns.Count; i++)
+                        sheet.AutoSizeColumn(i);
+                    workbook.Write(fs);
+                }
+                MessageBox.Show("匯出成功！", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"匯出失敗：{ex.Message}", "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+}
