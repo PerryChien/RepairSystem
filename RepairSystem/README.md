@@ -108,5 +108,5 @@ RepairSystem/
 如有任何問題，請聯繫：
 
 - 開發團隊：資訊部門
-- 電子郵件：<it@yourcompany.com>
-- 分機：1234
+- 電子郵件：<perrycht@hotmail.com>
+- 分機：none
